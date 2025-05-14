@@ -22,6 +22,10 @@ const relatedFileSearchStep = createStep({
     testFileName: z.string()
   }),
   outputSchema: z.object({
+    sourceFileContent: z.object({
+      filePath: z.string(),
+      content: z.string(),
+    }),
     relatedFileContents: z.array(z.object({
       filePath: z.string(),
       content: z.string(),
@@ -35,29 +39,61 @@ const relatedFileSearchStep = createStep({
     const { targetFolder, testScript, testFileName } = inputData;
     console.log('Running related file search with input data:', testFileName);
     const targetFilePath = path.join(targetFolder, testFileName);
-    const testFileContent = execSync(`cat ${targetFilePath}`, { encoding: 'utf-8' });
+    const sourceFilePath = targetFilePath.replace('.test.ts', '.ts').replace('/test/', '/src/');
+    console.log('Source file path:', sourceFilePath);
+    const sourceFileContent = execSync(`cat ${sourceFilePath}`, { encoding: 'utf-8' });
+
     const res = await relatedFileSearchAgent.generate([
       {
         role: 'user',
-        content: `filePath: ${testFileName}\nfileContent: ${testFileContent}`
+        content: `I need to find related files to help fix a failing test.
+
+## Source File Path
+${sourceFilePath}
+
+## Source File Content
+\`\`\`typescript
+${sourceFileContent}
+\`\`\`
+
+Please analyze this file and identify all related files that might be needed to understand and fix tests for this code. Return only the file paths as a JSON array.`
       },
     ], {
       output: z.array(z.string())
     });
     const relatedFiles = res.object;
     console.log('Identified related files:', relatedFiles);
-    const relatedFileContents = relatedFiles.map(file => {
-      const filePath = path.join(targetFolder, file);
-      const content = execSync(`cat ${filePath}`, { encoding: 'utf-8' });
-      return { filePath, content };
+    const relatedFileContents = relatedFiles.map(fileName => {
+      const filePath = fileName.indexOf(targetFolder) >= 0 ? fileName : path.join(targetFolder, fileName);
+      try {
+        const content = execSync(`cat ${filePath}`, { encoding: 'utf-8' });
+        return { filePath, content };
+      } catch (error) {
+        console.error(`Error reading file ${filePath}`);
+        return { filePath, content: '' };
+      }
     });
-    return { relatedFileContents, targetFolder, testFileName, testScript, count: 0 };
+    return {
+      sourceFileContent: {
+        filePath: sourceFilePath,
+        content: sourceFileContent
+      },
+      relatedFileContents: relatedFileContents.filter(file => file.content !== ''),
+      targetFolder,
+      testFileName,
+      testScript,
+      count: 0
+    };
   }
 });
 
 const fixSingleTestStep = createStep({
   id: 'fix-single-test',
   inputSchema: z.object({
+    sourceFileContent: z.object({
+      filePath: z.string(),
+      content: z.string(),
+    }),
     relatedFileContents: z.array(z.object({
       filePath: z.string(),
       content: z.string(),
@@ -68,6 +104,10 @@ const fixSingleTestStep = createStep({
     count: z.number(),
   }),
   outputSchema: z.object({
+    sourceFileContent: z.object({
+      filePath: z.string(),
+      content: z.string(),
+    }),
     relatedFileContents: z.array(z.object({
       filePath: z.string(),
       content: z.string(),
@@ -79,7 +119,7 @@ const fixSingleTestStep = createStep({
     isSuccess: z.boolean(),
   }),
   execute: async ({ inputData }) => {
-    const { targetFolder, testScript, testFileName, relatedFileContents, count } = inputData;
+    const { targetFolder, testScript, testFileName, relatedFileContents, sourceFileContent, count } = inputData;
     console.log('Running test fix with testFilename:', testFileName, 'count:', count);
     const targetFilePath = path.join(targetFolder, testFileName);
 
@@ -88,7 +128,7 @@ const fixSingleTestStep = createStep({
     try {
       execSync(`${testScript} ${testFileName}`, { cwd: targetFolder, encoding: 'utf-8', stdio: 'pipe' });
       console.log('Test script executed successfully, no failing tests found.');
-      return { isSuccess: true, count: count + 1, relatedFileContents, targetFolder, testScript, testFileName };
+      return { isSuccess: true, count: count + 1, sourceFileContent, relatedFileContents, targetFolder, testScript, testFileName };
     } catch (error: unknown) {
       const errorMessage = (error as string).toString();
       // ⎯⎯⎯⎯⎯⎯⎯ Failed Tests より下の部分を取得
@@ -102,16 +142,39 @@ const fixSingleTestStep = createStep({
     const testFixRes = await testFixAgent.generate([
       {
         role: 'user',
-        content: `filePath: ${targetFilePath}\nfileContent: ${fileContent}`,
-      },
-      {
-        role: 'user',
-        content: `relatedFiles\n${relatedFileContents.map(file => `filePath: ${file.filePath}\nfileContent: ${file.content}`).join('\n\n')}`,
-      },
-      {
-        role: 'user',
-        content: `errorText: ${errorText}`,
-      },
+        content: `I need help fixing a failing test. Here's all the information:
+
+## Test File
+File Path: ${targetFilePath}
+
+\`\`\`typescript
+${fileContent}
+\`\`\`
+
+## Error Output
+\`\`\`
+${errorText}
+\`\`\`
+
+## Test Target File
+### File: ${sourceFileContent.filePath}
+
+\`\`\`typescript
+${sourceFileContent.content}
+\`\`\`
+
+
+## Related Files
+${relatedFileContents.map(file => `
+### File: ${file.filePath}
+
+\`\`\`typescript
+${file.content}
+\`\`\`
+`).join('\n')}
+
+Please fix the failing test and return ONLY the JSON with the fixed test code.`,
+      }
     ], {
       output: z.object({
         content: z.string(),
@@ -123,9 +186,9 @@ const fixSingleTestStep = createStep({
 
     try {
       execSync(`${testScript} ${testFileName}`, { cwd: targetFolder, encoding: 'utf-8', stdio: 'pipe' });
-      return { isSuccess: true, count: count + 1, relatedFileContents, targetFolder, testScript, testFileName };
+      return { isSuccess: true, count: count + 1, sourceFileContent, relatedFileContents, targetFolder, testScript, testFileName };
     } catch (error: unknown) {
-      return { isSuccess: false, count: count + 1, relatedFileContents, targetFolder, testScript, testFileName };
+      return { isSuccess: false, count: count + 1, sourceFileContent, relatedFileContents, targetFolder, testScript, testFileName };
     }
   }
 });
@@ -146,7 +209,7 @@ const singleTestFixWorkflow = createWorkflow({
   ],
 })
 .then(relatedFileSearchStep)
-.dountil(fixSingleTestStep, async ({ inputData }) => inputData.isSuccess || inputData.count >= 2)
+.dountil(fixSingleTestStep, async ({ inputData }) => inputData.isSuccess || inputData.count >= 1)
 .commit();
 
 const runInitialTestsStep = createStep({
