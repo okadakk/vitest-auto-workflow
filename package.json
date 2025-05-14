@@ -4,7 +4,8 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "ts-node src/mastra/index.ts"
+    "start": "ts-node src/mastra/index.ts",
+    "cov": "ts-node src/mastra/cov.ts"
   },
   "keywords": [],
   "author": "",
